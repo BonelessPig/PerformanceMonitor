@@ -13,11 +13,14 @@ operating in the background and automatically starting when the system boots.
   and/or **[HWiNFO](https://www.hwinfo.com/)**, and runs a local HTTP server so
   the data can be accessed from Wallpaper Engine web wallpapers.
 - When using **psutil / NVIDIA SMI**, the following metrics are available:
-  - CPU usage
-  - GPU usage and temperature (NVIDIA GPUs only)
-  - RAM and VRAM usage (VRAM metrics for NVIDIA GPUs only)
-  - Disk usage
+  - CPU usage and current CPU clock speed
+  - GPU usage, temperature, fan speed and power (NVIDIA, AMD and Intel)
+  - RAM and VRAM usage
+  - Disk usage and SSD temperatures
   - Network upload and download speeds
+
+  No extra software is needed for these. GPU and SSD data come from the same
+  built-in Windows sources Task Manager uses.
 
 - When **[HWiNFO](https://www.hwinfo.com/)** is available, all sensors with
   **“Report value in Gadget”** enabled are collected automatically, providing
@@ -62,12 +65,15 @@ Only the wallpapers that I am aware of are listed here.
 - **Default (psutil / NVIDIA SMI)**  
   The application works out of the box using `psutil` and `nvidia-smi` when
   available.  
-  This provides basic system metrics such as CPU, memory, disk, network, GPU
-  usage, and supported temperature data on NVIDIA systems.
+  This provides CPU, memory, disk, network and GPU metrics, plus GPU
+  temperature and fan speed on any GPU whose driver reports them to Windows,
+  and SSD temperatures. Hard drives (HDDs) are skipped so they are never woken
+  from sleep.
 
 - **Advanced (HWiNFO)**  
-  For more detailed and accurate hardware sensors (temperatures, voltages, fan
-  speeds, etc.), HWiNFO can be used.
+  For sensors Windows does not expose on its own (CPU temperature, case and
+  CPU fan speeds, voltages, motherboard temperatures, etc.), HWiNFO can be
+  used.
 
   To enable it:
   1. Install and launch **[HWiNFO](https://www.hwinfo.com/)**.
@@ -237,16 +243,64 @@ The following keys are available by default under the `psutil` object:
 | --------------------- | ------------------------------------ | ------------- |
 | `cpu`                 | Overall CPU usage percentage         | %             |
 | `cpu_percore`         | Per-core CPU usage (if available)    | %             |
+| `cpu_freq_ghz`        | Current average CPU clock speed      | GHz           |
 | `memory`              | RAM usage percentage                 | %             |
 | `memory_gb`           | RAM usage in GB                      | GB            |
 | `gpu_usage`           | GPU usage percentage                 | %             |
 | `vram_usage`          | GPU memory usage percentage          | %             |
 | `vram_gb`             | GPU memory usage in GB               | GB            |
 | `gpu_temp`            | GPU temperature                      | °C            |
+| `gpus`                | Every GPU's details (see below)      | array         |
+| `disk_temps`          | SSD temperatures (see below)         | array         |
 | `upload_speed`        | Network upload speed (kilobits/s)    | kbps          |
 | `download_speed`      | Network download speed (kilobits/s)  | kbps          |
 | `c_disk`, `d_disk`, … | Disk usage as "used GB/total GB"     | GB            |
 | `timestamp`           | UNIX timestamp of measurement        | seconds       |
+
+`gpu_usage`, `vram_usage`, `vram_gb` and `gpu_temp` describe one GPU. They
+come from `nvidia-smi` on NVIDIA systems. Otherwise they come from Windows,
+using the GPU with the most video memory (`gpus[0]`).
+
+Any value the hardware or driver does not report is `null`. `cpu_freq_ghz`
+and each GPU's `usage` are also `null` for the first second after the service
+starts.
+
+#### GPU List (`gpus`)
+
+One object per GPU, sorted by video memory (largest first), from built-in
+Windows sources. Works for NVIDIA, AMD and Intel GPUs.
+
+| Key             | Description                                 | Unit |
+| --------------- | ------------------------------------------- | ---- |
+| `name`          | GPU name, e.g. `"NVIDIA GeForce RTX 2080"`  | text |
+| `usage`         | GPU usage (same method as Task Manager)     | %    |
+| `temp`          | GPU temperature                             | °C   |
+| `fan_rpm`       | GPU fan speed                               | RPM  |
+| `power`         | Power draw as a percent of the power limit  | %    |
+| `vram_used_gb`  | Video memory in use                         | GB   |
+| `vram_total_gb` | Total video memory                          | GB   |
+
+```json
+"gpus": [
+    {
+        "name": "NVIDIA GeForce RTX 2080",
+        "usage": 43.5, "temp": 44.4, "fan_rpm": 1422, "power": 26.6,
+        "vram_used_gb": 2.2, "vram_total_gb": 7.8
+    }
+]
+```
+
+#### SSD Temperatures (`disk_temps`)
+
+One object per SSD that reports a temperature, refreshed every 10 seconds.
+Hard drives are skipped. `disk` is the Windows disk number, as shown in Disk
+Management.
+
+```json
+"disk_temps": [
+    { "disk": 0, "name": "WD_BLACK SN850X 4000GB", "temp": 40 }
+]
+```
 
 #### Handling HWiNFO Data
 
@@ -301,6 +355,8 @@ async function fetchPerformance() {
       "RAM Usage": `${psutil.memory} %`,
       "GPU Usage": `${psutil.gpu_usage} %`,
       "GPU Temp": hwinfo["GPU Temperature"]?.value ?? `${psutil.gpu_temp} °C`,
+      "GPU Fan": `${psutil.gpus?.[0]?.fan_rpm ?? "N/A"} RPM`,
+      "CPU Clock": `${psutil.cpu_freq_ghz ?? "N/A"} GHz`,
       Download: `${psutil.download_speed} kbps`,
       Upload: `${psutil.upload_speed} kbps`,
     };
@@ -311,6 +367,11 @@ async function fetchPerformance() {
         stats[`Disk (${key.split("_")[0].toUpperCase()}:)`] = psutil[key];
       }
     });
+
+    // Add SSD temperatures
+    for (const drive of psutil.disk_temps ?? []) {
+      stats[`SSD Temp (${drive.name})`] = `${drive.temp} °C`;
+    }
 
     console.table(stats);
   } catch (err) {

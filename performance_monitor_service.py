@@ -24,6 +24,8 @@ import winreg
 import servicemanager
 import psutil
 
+from windows_sensors import WindowsSensors
+
 # Define data directory in ProgramData
 PROGRAM_DATA_DIR = (
     Path(os.environ.get("ProgramData", "C:\\ProgramData"))
@@ -78,6 +80,10 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
         self.last_net_io = psutil.net_io_counters()
         self.last_net_time = time.time()
         self.psutil_was_enabled = False
+        self.windows_sensors = WindowsSensors()
+        # None = not checked yet; then True/False for HWiNFO data under the
+        # configured SID, so the log only notes changes.
+        self.hwinfo_sid_found = None
         
         logger.warning(
             f"Performance Monitor Service initialized (Port: {self.port})"
@@ -161,6 +167,23 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
             logger.debug(f"GPU data unavailable: {e}")
 
         return None
+
+    @staticmethod
+    def gpu_stats_from_windows(gpu):
+        """Build get_gpu_stats()'s result from a WindowsSensors GPU entry,
+        for systems without nvidia-smi (AMD, Intel)."""
+        used = gpu["vram_used_gb"]
+        total = gpu["vram_total_gb"]
+        return {
+            "gpu_usage": gpu["usage"] if gpu["usage"] is not None else 0,
+            "vram_usage": (
+                round(used / total * 100, 1)
+                if used is not None and total else 0.0
+            ),
+            "vram_used_gb": used,
+            "vram_total_gb": total,
+            "gpu_temp": gpu["temp"],
+        }
 
     def SvcStop(self):
         logger.info("Service stop requested")
@@ -294,12 +317,15 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
             "psutil": {
                 'cpu': 0,
                 'cpu_percore': [],
+                'cpu_freq_ghz': None,
                 'memory': 0,
                 'memory_gb': None,
                 'gpu_usage': 0,
                 'vram_usage': 0,
                 'vram_gb': None,
                 'gpu_temp': None,
+                'gpus': [],
+                'disk_temps': [],
                 'upload_speed': 0,
                 'download_speed': 0
             },
@@ -361,12 +387,19 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                     "HWiNFO sensors loaded from "
                     f"HKEY_USERS\\{self.user_sid}"
                 )
+                if not self.hwinfo_sid_found:
+                    logger.warning(
+                        f"HWiNFO sensors found for SID: {self.user_sid}"
+                    )
+                    self.hwinfo_sid_found = True
                 return sensors
-            else:
+            # Log only when data goes missing, not on every tick.
+            if self.hwinfo_sid_found is not False:
                 logger.warning(
                     f"No HWiNFO sensors found for SID: {self.user_sid}, "
                     "falling back to HKEY_LOCAL_MACHINE"
                 )
+                self.hwinfo_sid_found = False
         
         # default: HKEY_LOCAL_MACHINE
         sensors = self._read_hwinfo_key(
@@ -392,6 +425,14 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 vram_used_gb, vram_total_gb = None, None
                 gpu_temp = None
                 gpu_stats = self.get_gpu_stats()
+
+                # --- Built-in Windows sensors (any GPU brand, SSDs) ---
+                sensors = self.windows_sensors.read()
+                if not gpu_stats and sensors["gpus"]:
+                    gpu_stats = self.gpu_stats_from_windows(
+                        sensors["gpus"][0]
+                    )
+
                 if gpu_stats:
                     gpu_usage = gpu_stats["gpu_usage"]
                     vram_usage = gpu_stats["vram_usage"]
@@ -433,6 +474,7 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                     # CPU
                     'cpu': round(psutil.cpu_percent(), 1),
                     'cpu_percore': psutil.cpu_percent(percpu=True),
+                    'cpu_freq_ghz': sensors["cpu_freq_ghz"],
 
                     # Memory
                     'memory': round(mem.percent, 1),
@@ -449,6 +491,10 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                         if vram_used_gb is not None else None
                     ),
                     'gpu_temp': gpu_temp,
+                    'gpus': sensors["gpus"],
+
+                    # SSD temperatures
+                    'disk_temps': sensors["disk_temps"],
 
                     # Network
                     'upload_speed': upload_speed,

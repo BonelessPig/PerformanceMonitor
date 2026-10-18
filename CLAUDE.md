@@ -7,8 +7,10 @@ code in this repository.
 
 A Windows-only Python service that collects system metrics once a second and
 serves them as JSON on `http://127.0.0.1:<port>/performance` for Wallpaper
-Engine web wallpapers. All of the logic lives in
-`performance_monitor_service.py`. It ships as a PyInstaller-built
+Engine web wallpapers. The service logic lives in
+`performance_monitor_service.py`; the built-in Windows hardware sensors (GPU,
+CPU clock, SSD temps) live in `windows_sensors.py`. It ships as a
+PyInstaller-built
 `PerformanceMonitor.exe`. There are no tests, no linter config, and no
 `requirements.txt`.
 
@@ -57,7 +59,14 @@ Data sources, each toggled by `config.json` → `collect`:
 - **psutil backend**: CPU, per-core CPU, RAM, network rate (computed from the
   delta against the previous sample), per-drive disk usage as `<letter>_disk`
   keys, and NVIDIA GPU stats via `nvidia-smi` (resolved once at import time with
-  `shutil.which`).
+  `shutil.which`). The same toggle covers `windows_sensors.WindowsSensors`,
+  which needs no extra software or admin: per-GPU temp/fan/power/VRAM size from
+  D3DKMT (gdi32, via ctypes), GPU usage/VRAM used/CPU clock from PDH counters
+  (`win32pdh`), and SSD temps from `IOCTL_STORAGE_QUERY_PROPERTY` (HDDs are
+  skipped so they aren't woken; polled every 10 s). Its `gpus` list fills the
+  classic `gpu_*` keys when `nvidia-smi` is missing. Fan speeds other than the
+  GPU's, voltages and accurate CPU temps need a kernel driver, which is why
+  HWiNFO remains the option for those.
 - **HWiNFO backend**: reads the HWiNFO "Gadget" registry values
   (`SOFTWARE\HWiNFO64\VSB`, indexed values `Sensor<i>`, `Label<i>`, `Value<i>`,
   `ValueRaw<i>`, `Color<i>`) until a label is missing. It tries

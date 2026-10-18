@@ -12,7 +12,10 @@ a = Analysis(
         'win32event',
         'servicemanager',
         'psutil',
-        'winreg'
+        'winreg',
+        'win32pdh',
+        'pywintypes',
+        'windows_sensors'
     ],
     hookspath=[],
     hooksconfig={},
@@ -33,6 +36,8 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
+    # One-folder build: keep the bare exe out of dist\ (COLLECT copies it).
+    exclude_binaries=True,
     name='PerformanceMonitor',
     debug=False,
     bootloader_ignore_signals=False,
