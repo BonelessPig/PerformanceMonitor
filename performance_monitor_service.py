@@ -185,6 +185,31 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
             "gpu_temp": gpu["temp"],
         }
 
+    @staticmethod
+    def flat_gpu_keys(gpus):
+        """Return gpu1_usage, gpu1_temp, ... for every GPU (numbered from 1
+        in PCI slot order), for wallpapers that only read top-level keys."""
+        keys = {}
+        for number, gpu in enumerate(gpus, start=1):
+            used = gpu["vram_used_gb"]
+            total = gpu["vram_total_gb"]
+            has_vram = used is not None and bool(total)
+            prefix = f"gpu{number}_"
+            keys[prefix + "name"] = gpu["name"]
+            keys[prefix + "usage"] = gpu["usage"]
+            keys[prefix + "temp"] = gpu["temp"]
+            keys[prefix + "temp_max"] = gpu["temp_max"]
+            keys[prefix + "fan_rpm"] = gpu["fan_rpm"]
+            keys[prefix + "fan_max"] = gpu["fan_max_rpm"]
+            keys[prefix + "power"] = gpu["power"]
+            keys[prefix + "vram_usage"] = (
+                round(used / total * 100, 1) if has_vram else None
+            )
+            keys[prefix + "vram_gb"] = (
+                f"{used:.1f} GB/{total:.1f} GB" if has_vram else None
+            )
+        return keys
+
     def SvcStop(self):
         logger.info("Service stop requested")
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
@@ -429,9 +454,13 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 # --- Built-in Windows sensors (any GPU brand, SSDs) ---
                 sensors = self.windows_sensors.read()
                 if not gpu_stats and sensors["gpus"]:
-                    gpu_stats = self.gpu_stats_from_windows(
-                        sensors["gpus"][0]
+                    # Prefer the GPU with the most VRAM, so a discrete card
+                    # wins over integrated graphics.
+                    primary = max(
+                        sensors["gpus"],
+                        key=lambda g: g["vram_total_gb"] or 0,
                     )
+                    gpu_stats = self.gpu_stats_from_windows(primary)
 
                 if gpu_stats:
                     gpu_usage = gpu_stats["gpu_usage"]
@@ -502,6 +531,9 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
 
                     'timestamp': time.time()
                 }
+
+                # --- Per-GPU flat keys (gpu1_temp, gpu2_temp, ...) ---
+                data.update(self.flat_gpu_keys(sensors["gpus"]))
 
                 # --- Disk capacity per drive ---
                 try:

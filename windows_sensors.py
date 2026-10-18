@@ -34,12 +34,15 @@ PERCENT_MAX = 100.0
 
 STATUS_SUCCESS = 0
 KMTQAITYPE_GETSEGMENTSIZE = 3
+KMTQAITYPE_ADAPTERADDRESS = 6
 KMTQAITYPE_ADAPTERREGISTRYINFO = 8
 KMTQAITYPE_ADAPTERPERFDATA = 62
 KMTQAITYPE_ADAPTERPERFDATA_CAPS = 63
 MAX_PATH_CHARS = 260
 # Adapter LUIDs change after a driver reload, so cap the per-adapter cache.
 MAX_CACHED_ADAPTERS = 16
+# Sorts adapters without a PCI address after real ones.
+PCI_UNKNOWN = (0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)
 
 
 class _Luid(ctypes.Structure):
@@ -80,6 +83,14 @@ class _SegmentSizeInfo(ctypes.Structure):
         ("DedicatedVideoMemorySize", ctypes.c_uint64),
         ("DedicatedSystemMemorySize", ctypes.c_uint64),
         ("SharedSystemMemorySize", ctypes.c_uint64),
+    ]
+
+
+class _AdapterAddress(ctypes.Structure):
+    _fields_ = [
+        ("BusNumber", ctypes.c_uint),
+        ("DeviceNumber", ctypes.c_uint),
+        ("FunctionNumber", ctypes.c_uint),
     ]
 
 
@@ -142,7 +153,7 @@ class _GpuAdapters:
 
     def read(self):
         """Return a list of dicts: luid, name, temp, fan_rpm, power,
-        vram_total. Adapters with no data at all are left out."""
+        vram_total, fan_max_rpm, temp_max. Adapters with no data at all are left out."""
         if self._gdi32 is None:
             return []
         adapters = self._enumerate()
@@ -179,10 +190,13 @@ class _GpuAdapters:
         return status == STATUS_SUCCESS
 
     def _read_static(self, handle):
-        """Name, VRAM size and fan support never change for an adapter."""
+        """Name, slot, VRAM size and fan support never change for an
+        adapter."""
         registry = _AdapterRegistryInfo()
+        address = _AdapterAddress()
         segments = _SegmentSizeInfo()
         caps = _AdapterPerfDataCaps()
+        has_address = self._query(handle, KMTQAITYPE_ADAPTERADDRESS, address)
         has_name = self._query(
             handle, KMTQAITYPE_ADAPTERREGISTRYINFO, registry
         )
@@ -194,10 +208,26 @@ class _GpuAdapters:
         )
         return {
             "name": registry.AdapterString.strip() if has_name else None,
+            # PCI slot: a stable order that matches nvidia-smi's numbering.
+            "pci": (
+                (address.BusNumber, address.DeviceNumber,
+                 address.FunctionNumber)
+                if has_address else PCI_UNKNOWN
+            ),
             "vram_total": (
                 segments.DedicatedVideoMemorySize if has_segments else 0
             ),
             "has_fan": has_caps and caps.MaxFanRPM > 0,
+            "fan_max_rpm": (
+                int(caps.MaxFanRPM)
+                if has_caps and caps.MaxFanRPM else None
+            ),
+            # The driver's warning temperature, where the card starts to
+            # throttle (83 °C on recent NVIDIA cards).
+            "temp_max": (
+                caps.TemperatureWarning / TENTHS
+                if has_caps and caps.TemperatureWarning else None
+            ),
         }
 
     def _read_adapter(self, info):
@@ -220,6 +250,7 @@ class _GpuAdapters:
         return {
             "luid": luid,
             "name": static["name"],
+            "pci": static["pci"],
             "temp": (
                 perf.Temperature / TENTHS
                 if has_perf and perf.Temperature else None
@@ -231,6 +262,8 @@ class _GpuAdapters:
                 perf.Power / TENTHS if has_perf and perf.Power else None
             ),
             "vram_total": static["vram_total"],
+            "fan_max_rpm": static["fan_max_rpm"],
+            "temp_max": static["temp_max"],
         }
 
 
@@ -483,7 +516,8 @@ class WindowsSensors:
 
     def read(self):
         """Return {"gpus": [...], "cpu_freq_ghz": float|None,
-        "disk_temps": [...]}. GPUs are sorted biggest VRAM first."""
+        "disk_temps": [...]}. GPUs are in PCI slot order, the same order
+        nvidia-smi uses."""
         result = {"gpus": [], "cpu_freq_ghz": None, "disk_temps": []}
         try:
             has_counters = self._counters.collect()
@@ -513,9 +547,7 @@ class WindowsSensors:
                     vram_used[luid] = vram_used.get(luid, 0) + used
 
         gpus = []
-        adapters = sorted(
-            self._gpus.read(), key=lambda a: a["vram_total"], reverse=True
-        )
+        adapters = sorted(self._gpus.read(), key=lambda a: a["pci"])
         for adapter in adapters:
             luid = adapter["luid"]
             used = vram_used.get(luid)
@@ -526,7 +558,9 @@ class WindowsSensors:
                     round(usage.get(luid, 0.0), 1) if has_usage else None
                 ),
                 "temp": _round(adapter["temp"]),
+                "temp_max": _round(adapter["temp_max"]),
                 "fan_rpm": adapter["fan_rpm"],
+                "fan_max_rpm": adapter["fan_max_rpm"],
                 "power": _round(adapter["power"]),
                 "vram_used_gb": (
                     round(used / BYTES_PER_GB, 1)

@@ -258,8 +258,9 @@ The following keys are available by default under the `psutil` object:
 | `timestamp`           | UNIX timestamp of measurement        | seconds       |
 
 `gpu_usage`, `vram_usage`, `vram_gb` and `gpu_temp` describe one GPU. They
-come from `nvidia-smi` on NVIDIA systems. Otherwise they come from Windows,
-using the GPU with the most video memory (`gpus[0]`).
+come from `nvidia-smi` on NVIDIA systems (its first GPU, the same one as
+`gpu1_*`). Otherwise they come from Windows, using the GPU with the most video
+memory.
 
 Any value the hardware or driver does not report is `null`. `cpu_freq_ghz`
 and each GPU's `usage` are also `null` for the first second after the service
@@ -267,28 +268,54 @@ starts.
 
 #### GPU List (`gpus`)
 
-One object per GPU, sorted by video memory (largest first), from built-in
-Windows sources. Works for NVIDIA, AMD and Intel GPUs.
+One object per GPU, in PCI slot order (the same order `nvidia-smi` and most
+monitoring tools number GPUs), from built-in Windows sources. Works for NVIDIA,
+AMD and Intel GPUs.
 
 | Key             | Description                                 | Unit |
 | --------------- | ------------------------------------------- | ---- |
 | `name`          | GPU name, e.g. `"NVIDIA GeForce RTX 2080"`  | text |
 | `usage`         | GPU usage (same method as Task Manager)     | %    |
 | `temp`          | GPU temperature                             | °C   |
+| `temp_max`      | Card's warning temperature (throttle point) | °C   |
 | `fan_rpm`       | GPU fan speed                               | RPM  |
+| `fan_max_rpm`   | Card's maximum fan speed                    | RPM  |
 | `power`         | Power draw as a percent of the power limit  | %    |
 | `vram_used_gb`  | Video memory in use                         | GB   |
 | `vram_total_gb` | Total video memory                          | GB   |
+
+`temp_max` and `fan_max_rpm` are the limits the graphics driver reports for
+the card. They are useful as the full scale of a gauge. Either is `null` when
+the driver doesn't report it.
 
 ```json
 "gpus": [
     {
         "name": "NVIDIA GeForce RTX 2080",
-        "usage": 43.5, "temp": 44.4, "fan_rpm": 1422, "power": 26.6,
+        "usage": 43.5, "temp": 44.4, "temp_max": 83.0,
+        "fan_rpm": 1422, "fan_max_rpm": 3838, "power": 26.6,
         "vram_used_gb": 2.2, "vram_total_gb": 7.8
     }
 ]
 ```
+
+#### Per-GPU Keys (`gpu1_*`, `gpu2_*`, …)
+
+The same data as `gpus`, as plain top-level keys, for wallpapers that can only
+read simple keys. GPUs are numbered from 1 in the same order as `gpus`, so
+`gpu2_temp` is `gpus[1].temp`. Keys exist only for GPUs that are present.
+
+| Key              | Description                                | Unit / Format |
+| ---------------- | ------------------------------------------ | ------------- |
+| `gpuN_name`      | GPU name                                   | text          |
+| `gpuN_usage`     | GPU usage                                  | %             |
+| `gpuN_temp`      | GPU temperature                            | °C            |
+| `gpuN_temp_max`  | Card's warning temperature (throttle point)| °C            |
+| `gpuN_fan_rpm`   | GPU fan speed                              | RPM           |
+| `gpuN_fan_max`   | Card's maximum fan speed                   | RPM           |
+| `gpuN_power`     | Power draw as a percent of the power limit | %             |
+| `gpuN_vram_usage`| Video memory usage percentage              | %             |
+| `gpuN_vram_gb`   | Video memory as "used GB/total GB"         | GB            |
 
 #### SSD Temperatures (`disk_temps`)
 
