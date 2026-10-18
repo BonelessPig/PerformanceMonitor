@@ -25,11 +25,16 @@ import servicemanager
 import psutil
 
 # Define data directory in ProgramData
-PROGRAM_DATA_DIR = Path(os.environ.get("ProgramData", "C:\\ProgramData")) / "PerformanceMonitor"
+PROGRAM_DATA_DIR = (
+    Path(os.environ.get("ProgramData", "C:\\ProgramData"))
+    / "PerformanceMonitor"
+)
+REPO_URL = "https://github.com/sheetau/PerformanceMonitor"
 SERVICE_RUN_ARGUMENT = "--run-service"
 NVIDIA_SMI_PATH = shutil.which("nvidia-smi")
 GPU_AVAILABLE = NVIDIA_SMI_PATH is not None
 DELETE_ACCESS = 0x00010000
+STOP_WAIT_SLICE_MS = 500
 
 # Logging configuration
 LOG_DIR = Path(os.path.expandvars(r'%PROGRAMDATA%\PerformanceMonitor'))
@@ -53,10 +58,15 @@ logging.basicConfig(
 class PerformanceMonitorService(win32serviceutil.ServiceFramework):
     _svc_name_ = "PerformanceMonitor"
     _svc_display_name_ = "Performance Monitor Service"
-    _svc_description_ = "System performance monitoring service for Wallpaper Engine"
+    _svc_description_ = (
+        "System performance monitoring service for Wallpaper Engine"
+    )
     
-    def __init__(self, args):
-        win32serviceutil.ServiceFramework.__init__(self, args)
+    def __init__(self, args, dev_mode=False):
+        # The base class registers with the Service Control Manager and
+        # raises when the process isn't hosted by it, so dev mode skips it.
+        if not dev_mode:
+            win32serviceutil.ServiceFramework.__init__(self, args)
         self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
         self.http_server = None
         self.server_thread = None
@@ -69,7 +79,9 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
         self.last_net_time = time.time()
         self.psutil_was_enabled = False
         
-        logger.warning(f"Performance Monitor Service initialized (Port: {self.port})")
+        logger.warning(
+            f"Performance Monitor Service initialized (Port: {self.port})"
+        )
     
     def load_config(self):
         """Load configuration"""
@@ -99,7 +111,10 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                     if not user_sid:
                         user_sid = None
 
-                logger.warning(f"Config loaded: port={port}, collect={collect}, user_sid={'set' if user_sid else 'not set'}")
+                logger.warning(
+                    f"Config loaded: port={port}, collect={collect}, "
+                    f"user_sid={'set' if user_sid else 'not set'}"
+                )
 
             return port, collect, user_sid
         except Exception as e:
@@ -114,7 +129,8 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
         try:
             command = [
                 NVIDIA_SMI_PATH,
-                "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                "--query-gpu=utilization.gpu,memory.used,"
+                "memory.total,temperature.gpu",
                 "--format=csv,noheader,nounits",
             ]
             result = subprocess.run(
@@ -133,7 +149,10 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
             memory_total = float(memory_total)
             return {
                 "gpu_usage": round(float(gpu_util), 1),
-                "vram_usage": round((memory_used / memory_total) * 100, 1) if memory_total else 0.0,
+                "vram_usage": (
+                    round((memory_used / memory_total) * 100, 1)
+                    if memory_total else 0.0
+                ),
                 "vram_used_gb": round(memory_used / 1024, 1),
                 "vram_total_gb": round(memory_total / 1024, 1),
                 "gpu_temp": round(float(temperature), 1),
@@ -146,18 +165,24 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
     def SvcStop(self):
         logger.info("Service stop requested")
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+        self.stop_workers()
+        logger.info("Service stopped")
+
+    def stop_workers(self):
+        """Stop the monitor loop and HTTP server, and end the main wait."""
         win32event.SetEvent(self.hWaitStop)
         self.running = False
-        
-        if self.http_server:
+
+        # Keep a local reference: run_http_server clears self.http_server once
+        # serve_forever returns, which can happen right after shutdown().
+        server = self.http_server
+        if server:
             logger.info("Stopping local HTTP server...")
             try:
-                self.http_server.shutdown()
-                self.http_server.server_close()
+                server.shutdown()
+                server.server_close()
             except Exception as e:
                 logger.warning(f"HTTP server shutdown warning: {e}")
-        
-        logger.info("Service stopped")
 
     def SvcDoRun(self):
         logger.info("Performance Monitor Service starting...")
@@ -188,19 +213,27 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
             sys_version = ""
 
             def log_message(self, format, *args):
-                logger.debug("HTTP %s - %s", self.address_string(), format % args)
+                logger.debug(
+                    "HTTP %s - %s", self.address_string(), format % args
+                )
 
             def _send_json(self, payload, status_code=200):
                 body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
                 self.send_response(status_code)
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header(
+                    'Content-Type', 'application/json; charset=utf-8'
+                )
                 self.send_header('Content-Length', str(len(body)))
                 self.send_header('Cache-Control', 'no-store')
 
                 origin = self.headers.get('Origin')
                 if origin in (None, "null"):
-                    self.send_header('Access-Control-Allow-Origin', 'null' if origin == "null" else '*')
-                elif origin.startswith('http://127.0.0.1') or origin.startswith('http://localhost'):
+                    self.send_header(
+                        'Access-Control-Allow-Origin',
+                        'null' if origin == "null" else '*'
+                    )
+                elif (origin.startswith('http://127.0.0.1')
+                      or origin.startswith('http://localhost')):
                     self.send_header('Access-Control-Allow-Origin', origin)
                     self.send_header('Vary', 'Origin')
 
@@ -215,8 +248,12 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 self.send_header('Access-Control-Allow-Headers', 'Content-Type')
                 origin = self.headers.get('Origin')
                 if origin in (None, "null"):
-                    self.send_header('Access-Control-Allow-Origin', 'null' if origin == "null" else '*')
-                elif origin.startswith('http://127.0.0.1') or origin.startswith('http://localhost'):
+                    self.send_header(
+                        'Access-Control-Allow-Origin',
+                        'null' if origin == "null" else '*'
+                    )
+                elif (origin.startswith('http://127.0.0.1')
+                      or origin.startswith('http://localhost')):
                     self.send_header('Access-Control-Allow-Origin', origin)
                     self.send_header('Vary', 'Origin')
                 self.end_headers()
@@ -225,7 +262,8 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 try:
                     if self.path == '/performance':
                         if service.data_file.exists():
-                            with open(service.data_file, 'r', encoding='utf-8') as f:
+                            with open(service.data_file, 'r',
+                                      encoding='utf-8') as f:
                                 payload = json.load(f)
                         else:
                             payload = service.get_default_data()
@@ -265,10 +303,8 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 'upload_speed': 0,
                 'download_speed': 0
             },
-            "hwinfo": {
-                "available": False,
-                "sensors": []
-            }
+            # Same shape as normal output: a list of sensor dicts.
+            "hwinfo": []
         }
 
     def _read_hwinfo_key(self, root, path):
@@ -321,10 +357,16 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 fr"{self.user_sid}\{hwinfo_reg_path}"
             )
             if sensors:
-                logger.debug(f"HWiNFO sensors loaded from HKEY_USERS\\{self.user_sid}")
+                logger.debug(
+                    "HWiNFO sensors loaded from "
+                    f"HKEY_USERS\\{self.user_sid}"
+                )
                 return sensors
             else:
-                logger.warning(f"No HWiNFO sensors found for SID: {self.user_sid}, falling back to HKEY_LOCAL_MACHINE")
+                logger.warning(
+                    f"No HWiNFO sensors found for SID: {self.user_sid}, "
+                    "falling back to HKEY_LOCAL_MACHINE"
+                )
         
         # default: HKEY_LOCAL_MACHINE
         sensors = self._read_hwinfo_key(
@@ -360,7 +402,7 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 # --- Memory ---
                 mem = psutil.virtual_memory()
 
-                # --- Network (upload/download speed in Kpbs) ---
+                # --- Network (upload/download speed in kilobits/s) ---
                 net_io_now = psutil.net_io_counters()
                 time_now = time.time()
 
@@ -372,11 +414,15 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                     elapsed = time_now - self.last_net_time
                     if elapsed > 0:
                         upload_speed = round(
-                            ((net_io_now.bytes_sent - self.last_net_io.bytes_sent) * 8 / 1000) / elapsed,
+                            ((net_io_now.bytes_sent
+                              - self.last_net_io.bytes_sent)
+                             * 8 / 1000) / elapsed,
                             1
                         )
                         download_speed = round(
-                            ((net_io_now.bytes_recv - self.last_net_io.bytes_recv) * 8 / 1000) / elapsed,
+                            ((net_io_now.bytes_recv
+                              - self.last_net_io.bytes_recv)
+                             * 8 / 1000) / elapsed,
                             1
                         )
 
@@ -390,7 +436,10 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
 
                     # Memory
                     'memory': round(mem.percent, 1),
-                    'memory_gb': f"{mem.used / (1024**3):.1f} GB/{mem.total / (1024**3):.1f} GB",
+                    'memory_gb': (
+                        f"{mem.used / (1024**3):.1f} GB/"
+                        f"{mem.total / (1024**3):.1f} GB"
+                    ),
 
                     # GPU
                     'gpu_usage': gpu_usage,
@@ -464,16 +513,22 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                     log_parts.append(f"Memory={psutil_data.get('memory')}%")
 
                     if psutil_data.get("gpu_temp") is not None:
-                        log_parts.append(f"GPU Temp={psutil_data['gpu_temp']}°C")
+                        log_parts.append(
+                            f"GPU Temp={psutil_data['gpu_temp']}°C"
+                        )
 
                 hwinfo_data = data.get("hwinfo")
                 if isinstance(hwinfo_data, list) and hwinfo_data:
                     log_parts.append(f"HWiNFO={len(hwinfo_data)} sensors")
 
                 if log_parts:
-                    logger.debug("Performance data updated: " + ", ".join(log_parts))
+                    logger.debug(
+                        "Performance data updated: " + ", ".join(log_parts)
+                    )
                 else:
-                    logger.debug("Performance data updated (no active backends)")
+                    logger.debug(
+                        "Performance data updated (no active backends)"
+                    )
 
             except Exception as e:
                 logger.error(f"Error updating performance data: {e}")
@@ -488,9 +543,13 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
         """Run the local HTTP server."""
         try:
             handler = self.create_http_handler()
-            self.http_server = ThreadingHTTPServer(('127.0.0.1', self.port), handler)
+            self.http_server = ThreadingHTTPServer(
+                ('127.0.0.1', self.port), handler
+            )
             self.http_server.daemon_threads = True
-            logger.info(f"Starting local HTTP server on http://127.0.0.1:{self.port}")
+            logger.info(
+                f"Starting local HTTP server on http://127.0.0.1:{self.port}"
+            )
             self.http_server.serve_forever(poll_interval=0.5)
         except Exception as e:
             logger.error(f"HTTP server error: {e}")
@@ -501,16 +560,25 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
     def main(self):
         """Main processing"""
         try:
-            self.monitor_thread = threading.Thread(target=self.update_performance_loop, daemon=True)
+            self.monitor_thread = threading.Thread(
+                target=self.update_performance_loop, daemon=True
+            )
             self.monitor_thread.start()
             logger.info("Performance monitoring thread started")
             
-            self.server_thread = threading.Thread(target=self.run_http_server, daemon=True)
+            self.server_thread = threading.Thread(
+                target=self.run_http_server, daemon=True
+            )
             self.server_thread.start()
             logger.info("HTTP server thread started")
             
             logger.info("Performance Monitor Service is running")
-            win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
+            # Wait in short slices rather than INFINITE so Python can deliver
+            # Ctrl+C (KeyboardInterrupt) when running in dev mode.
+            while win32event.WaitForSingleObject(
+                self.hWaitStop, STOP_WAIT_SLICE_MS
+            ) == win32event.WAIT_TIMEOUT:
+                pass
             
         except Exception as e:
             logger.error(f"Main thread error: {e}")
@@ -549,7 +617,10 @@ def install_service():
     """Install the Windows service"""
     try:
         logger.info("Installing Performance Monitor Service...")
-        exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+        exe_path = (
+            sys.executable if getattr(sys, 'frozen', False)
+            else os.path.abspath(__file__)
+        )
         logger.info(f"Service executable path: {exe_path}")
         
         svc_name = PerformanceMonitorService._svc_name_
@@ -577,24 +648,35 @@ def install_service():
                     logger.info("Existing service removed successfully.")
                     break
             else:
-                logger.error("Timeout waiting for service deletion to complete.")
+                logger.error(
+                    "Timeout waiting for service deletion to complete."
+                )
                 return False
 
         except Exception as e:
-            logger.debug(f"No existing service to remove or removal failed: {e}")
+            logger.debug(
+                f"No existing service to remove or removal failed: {e}"
+            )
 
         hscm = win32service.OpenSCManager(
             None,
             None,
-            win32service.SC_MANAGER_CONNECT | win32service.SC_MANAGER_CREATE_SERVICE
+            win32service.SC_MANAGER_CONNECT
+            | win32service.SC_MANAGER_CREATE_SERVICE
         )
         try:
-            service_cmd = subprocess.list2cmdline([exe_path, SERVICE_RUN_ARGUMENT])
+            service_cmd = subprocess.list2cmdline(
+                [exe_path, SERVICE_RUN_ARGUMENT]
+            )
             hs = win32service.CreateService(
                 hscm,
                 svc_name,
                 PerformanceMonitorService._svc_display_name_,
-                win32service.SERVICE_START | win32service.SERVICE_STOP | DELETE_ACCESS | win32service.SERVICE_QUERY_STATUS | win32service.SERVICE_CHANGE_CONFIG,
+                (win32service.SERVICE_START
+                 | win32service.SERVICE_STOP
+                 | DELETE_ACCESS
+                 | win32service.SERVICE_QUERY_STATUS
+                 | win32service.SERVICE_CHANGE_CONFIG),
                 win32service.SERVICE_WIN32_OWN_PROCESS,
                 win32service.SERVICE_AUTO_START,
                 win32service.SERVICE_ERROR_NORMAL,
@@ -632,7 +714,9 @@ def start_service():
     """Start the service"""
     try:
         logger.info("Starting Performance Monitor Service...")
-        hscm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+        hscm = win32service.OpenSCManager(
+            None, None, win32service.SC_MANAGER_CONNECT
+        )
         try:
             hs = win32service.OpenService(
                 hscm,
@@ -663,7 +747,9 @@ def get_service_port():
         else:
             return 5000
     except Exception as e:
-        logger.warning(f"Error loading port config: {e}, using default port 5000")
+        logger.warning(
+            f"Error loading port config: {e}, using default port 5000"
+        )
         return 5000
 
 def main():
@@ -678,7 +764,9 @@ def main():
             if not check_admin_rights():
                 print("Admin rights are required. Restarting as admin...")
                 if not request_admin_rights():
-                    input("Failed to obtain admin rights. Press Enter to exit...")
+                    input(
+                        "Failed to obtain admin rights. Press Enter to exit..."
+                    )
                     return
                 else:
                     return
@@ -690,24 +778,31 @@ def main():
                 time.sleep(3)
                 if start_service():
                     port = get_service_port()
-                    print("\n============================================================")
+                    print("\n=============================="
+                          "==============================")
                     print("Service started successfully.")
                     print(f" > Log file: {LOG_FILE}")
-                    print(f" > Performance data: http://127.0.0.1:{port}/performance")
+                    print(" > Performance data: "
+                          f"http://127.0.0.1:{port}/performance")
                     print(f" > Service status: http://127.0.0.1:{port}/status")
-                    print("============================================================")
-                    print("\nFor more detailed usage instructions, please refer to the README:")
-                    print(" > https://github.com/sheetau/PerformanceMonitor/tree/main")
-                    print("\nYou can change the port number and data sources by placing a config.json file")
+                    print("=============================="
+                          "==============================")
+                    print("\nFor more detailed usage instructions, "
+                          "please refer to the README:")
+                    print(f" > {REPO_URL}/tree/main")
+                    print("\nYou can change the port number and data sources "
+                          "by placing a config.json file")
                     print(f"in {PROGRAM_DATA_DIR}:")
-                    print(" > https://github.com/sheetau/PerformanceMonitor/blob/main/config.json")
+                    print(f" > {REPO_URL}/blob/main/config.json")
                     print("\nTo uninstall, download the uninstaller from:")
-                    print(" > https://github.com/sheetau/PerformanceMonitor/releases/latest")
+                    print(f" > {REPO_URL}/releases/latest")
                         
                 else:
-                    print(f"Failed to start the service. Check logs at {LOG_FILE}")
+                    print("Failed to start the service. "
+                          f"Check logs at {LOG_FILE}")
             else:
-                print(f"Failed to install the service. Check logs at {LOG_FILE}")
+                print("Failed to install the service. "
+                      f"Check logs at {LOG_FILE}")
             
             input("\nPress Enter to exit...")
             return
@@ -731,19 +826,25 @@ def main():
                 return
             elif arg == 'stop':
                 try:
-                    win32serviceutil.StopService(PerformanceMonitorService._svc_name_)
+                    win32serviceutil.StopService(
+                        PerformanceMonitorService._svc_name_
+                    )
                     print("Service stopped.")
                 except Exception as e:
                     print(f"Service stop error: {e}")
                 return
             elif arg == 'remove':
                 try:
-                    win32serviceutil.StopService(PerformanceMonitorService._svc_name_)
+                    win32serviceutil.StopService(
+                        PerformanceMonitorService._svc_name_
+                    )
                     time.sleep(2)
                 except:
                     pass
                 try:
-                    win32serviceutil.RemoveService(PerformanceMonitorService._svc_name_)
+                    win32serviceutil.RemoveService(
+                        PerformanceMonitorService._svc_name_
+                    )
                     print("Service removed.")
                 except Exception as e:
                     print(f"Service removal error: {e}")
@@ -756,7 +857,9 @@ def main():
                 return
             else:
                 try:
-                    win32serviceutil.HandleCommandLine(PerformanceMonitorService)
+                    win32serviceutil.HandleCommandLine(
+                        PerformanceMonitorService
+                    )
                 except SystemExit:
                     pass
                 return
@@ -765,8 +868,18 @@ def main():
             win32serviceutil.HandleCommandLine(PerformanceMonitorService)
         else:
             print("Development mode - running service directly")
-            service = PerformanceMonitorService([''])
-            service.main()
+            service = PerformanceMonitorService([''], dev_mode=True)
+            # SvcDoRun normally sets this; without it the monitor loop
+            # exits at once.
+            service.running = True
+            print("Press Ctrl+C to stop.")
+            try:
+                service.main()
+            except KeyboardInterrupt:
+                print("Stopping...")
+                service.stop_workers()
+                logger.info("Development mode stopped")
+                return
     
     logger.info("Starting as Windows Service")
     servicemanager.Initialize()
